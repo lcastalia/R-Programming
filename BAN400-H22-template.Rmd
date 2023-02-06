@@ -1,0 +1,517 @@
+---
+title: "Ban400 home exam, fall 2022, Candidate no 95"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE, warning = FALSE)
+```
+
+# Stefanski pandemic data
+
+## Problem 1
+
+```{r, eval=T, error=TRUE, message=TRUE}
+
+library(tidyverse)
+library(magrittr)
+library(readxl)
+library(stats)
+library(tidyr)
+library(dplyr)
+library(lintr)
+library(styler)
+
+# Load data, select relevant variables:
+df <- read_excel("Stefanski_pandemic_data.xlsx") %>%
+  select(-tree_ring, -pandemic_pc, -gdp)
+
+# Define function for estimating regression for a given
+# point of the impulse response function, and return a
+# data frame of coefficients with summary statistics:
+runreg <-
+  function(h, df) {
+    df %>%
+      select(country, year, ln_gdp, pandemic_01, war) %>%
+      mutate(country = factor(country)) %>%
+      group_by(country) %>%
+      mutate(
+        lead_ln_gdp = lead(ln_gdp, h, order_by = year),
+        lag_1_pandemic_01 = lag(pandemic_01, 1, order_by = year),
+        lag_1_war = lag(war, 1, order_by = year),
+        lag_ln_gdp = lag(ln_gdp, 1, order_by = year),
+        vienna = case_when(year >= 1815 ~ 1, TRUE ~ 0),
+        ww2 = case_when(year >= 1945 ~ 1, TRUE ~ 0),
+        oil = case_when(year >= 1973 ~ 1, TRUE ~ 0),
+        vienna_t = vienna * year,
+        ww2_t = ww2 * year,
+        oil_t = oil * year
+      ) %>%
+      ungroup() %>%
+      lm(
+        lead_ln_gdp ~
+          country + lag_ln_gdp + pandemic_01 +
+          lag_1_pandemic_01 + year + war +
+          lag_1_war + vienna + oil + year +
+          ww2 + vienna_t + oil_t + ww2_t,
+        data = .
+      ) %>%
+      summary() %>%
+      .$coefficients %>%
+      as.data.frame() %>%
+      rownames_to_column() %>%
+      as_tibble() %>%
+      mutate(h = h)
+  }
+
+# Iterate over h=0,...,40, and estimate the different
+# IRF(h) coefficients. Thereafter, plot the results
+lapply(0:40, FUN = runreg, df = df) %>%
+  bind_rows() %>%
+  filter(rowname == "pandemic_01") %>%
+  ggplot(aes(x = h)) +
+  geom_line(aes(y = Estimate * 100)) +
+  geom_ribbon(aes(
+    ymin = (Estimate - 1.96 * `Std. Error`) * 100,
+    ymax = (Estimate + 1.96 * `Std. Error`) * 100
+  ), alpha = .1) +
+  geom_hline(yintercept = 0) +
+  xlab("Fcast horizon") +
+  ylab("Impulse response, percent") +
+  ggtitle("Estimated impulse response of pandemics on GDP pr capita") +
+  theme_classic()
+```
+
+Comment: The total trend of results are similar to S2020 Figure 9 within given horizon. However, 20 years after the outbreak of the pandemic, the estimates start to differ. In S2020 figure 9, the response tends to converge to 0, meaning the disappearance of the effect. In this figure, the effect tends to be constant negative, meaning that the model is not robust enough to long horizons and needs to be modified. That is because the model does not take tree rings, which has a large effect on the estimates, and other explanatory variables into consideration. Therefore, this model is can be used as a reference for short-term estimates, but the model in S2020 is more suitable and reliable for both short-term and long-term estimates.
+
+## Problem 2
+
+```{r, eval=T, error=TRUE, message=TRUE}
+# Create sim_one_country()
+sim_one_country <- function(country, T, p_pand, p_war, coeff_lag_ln_gdp, sigma,
+                            impulse_response, sigma_initial_value, sigma_alpha) {
+  # Generate variables and parameter
+  year <- seq(1:T)
+  pandemic_01 <- rbinom(T, size = 1, prob = p_pand)
+  war <- rbinom(T, size = 1, prob = p_war)
+  alpha <- rnorm(1, sd = sigma_alpha)
+  ln_gdp <- numeric()
+  ln_gdp[1] <- alpha + rnorm(1, sd = sigma_initial_value)
+  
+  # Calculate ln_gdp in a loop
+  for (t in 1:T) {
+    # Initialize the first value of ln_gdp
+    if (t == 1) {
+      next
+    } else {
+      # Generate parameters
+      resid <- rnorm(1, sd = sigma)
+      M <- length(impulse_response)
+
+      # Initialize first value of IRF(impulse response function)
+      pandemic_irf <- 0
+      for (m in 1:M) {
+        if (t - m + 1 > 0) {
+          # Calculate the sum of pandemic_01 * impulse_response
+          pandemic_irf <- pandemic_irf + pandemic_01[t - m + 1] * impulse_response[m]
+        }
+      }
+      # Calculate ln_gdp
+      ln_gdp[t] <- alpha + coeff_lag_ln_gdp * ln_gdp[t - 1] + pandemic_irf + resid
+    }
+  }
+  df <- data.frame(country = country, year, ln_gdp, pandemic_01, war)
+  return(df)
+}
+
+# Create simdat()
+simdat <- function(N, T, p_pand, p_war, sigma, coeff_lag_ln_gdp,
+                   impulse_response, sigma_initial_value, sigma_alpha) {
+  # Initialize empty data frame to store simulated data
+  df <- data.frame(
+    country = character(),
+    year = integer(),
+    ln_gdp = numeric(),
+    pandemic_01 = integer(),
+    war = integer()
+    )
+
+  # Ran sim_one_country for N times and store simulated data
+  for (i in 1:N) {
+    df_country <- sim_one_country(
+      i, T, p_pand, p_war, coeff_lag_ln_gdp, sigma,
+      impulse_response, sigma_initial_value, sigma_alpha
+    )
+    df <- rbind(df, df_country)
+  }
+  # Return a data frame with simulated data for N different countris
+  return(df)
+}
+```
+
+```{r, eval=T, error=TRUE, message=FALSE}
+library(assertthat)
+library(magrittr)
+
+# Tests for assignment 2. Leave this code chunk *unchanged* and
+# ensure you run the tests *after* the chunk with you answer to
+# assignment 2.
+
+library(assertthat)
+
+assert_that(
+  sim_one_country(
+    country = 1,
+    T = 5,
+    p_pand = 1,
+    p_war = 0,
+    sigma = 0,
+    coeff_lag_ln_gdp = 0,
+    impulse_response = c(1),
+    sigma_initial_value = 0,
+    sigma_alpha = 0
+  ) %>%
+    filter(year > 1) %>%
+    filter(ln_gdp == 1) %>%
+    nrow() == 4,
+  msg = "Impulse responses are not correct"
+)
+
+assert_that(
+  all(
+    sim_one_country(
+      country = 1,
+      T = 5,
+      p_pand = 1,
+      p_war = 0,
+      sigma = 0,
+      coeff_lag_ln_gdp = 0,
+      impulse_response = c(1, 2, 3, 4),
+      sigma_initial_value = 0,
+      sigma_alpha = 0
+    )$ln_gdp == c(0, 3, 6, 10, 10)
+  ),
+  msg = "Impulse response is not implemented correctly"
+)
+
+assert_that(
+  all(
+    sim_one_country(
+      country = 1,
+      T = 5,
+      p_pand = 1,
+      p_war = 0,
+      sigma = 0,
+      coeff_lag_ln_gdp = 0,
+      impulse_response = rep(1, 10),
+      sigma_initial_value = 0,
+      sigma_alpha = 0
+    )$ln_gdp == c(0, 2, 3, 4, 5)
+  ),
+  msg = "Function fails if impulse response is longer than 1:T"
+)
+
+assert_that(
+  abs(sd(
+    replicate(
+      1000,
+      sim_one_country(
+        country = 1,
+        T = 1,
+        p_pand = 1,
+        p_war = 0,
+        sigma = 0,
+        coeff_lag_ln_gdp = 0,
+        impulse_response = c(0),
+        sigma_initial_value = 1,
+        sigma_alpha = 0
+      )$ln_gdp
+    )
+  ) - 1) < .1,
+  msg = "Random number generation does not work"
+)
+
+assert_that(
+  abs(mean(
+    simdat(
+      N = 1,
+      T = 10000,
+      p_pand = .1,
+      p_war = 0,
+      sigma = 0,
+      coeff_lag_ln_gdp = 0,
+      impulse_response = rep(1, 10),
+      sigma_initial_value = 0,
+      sigma_alpha = 0
+    )$pandemic_01
+  ) - .1) < .01,
+  msg = "Pandemic variable simulation does not work"
+)
+
+assert_that(
+  simdat(
+    N = 10,
+    T = 5,
+    p_pand = .1,
+    p_war = 0,
+    sigma = 1,
+    coeff_lag_ln_gdp = 0,
+    impulse_response = rep(1, 10),
+    sigma_initial_value = 0,
+    sigma_alpha = 0
+  ) %>% nrow() == 50,
+  msg = "The simdat function return wrong number of rows"
+)
+
+assert_that(
+  length(unique(simdat(
+    N = 100,
+    T = 5,
+    p_pand = .1,
+    p_war = 0,
+    sigma = 1,
+    coeff_lag_ln_gdp = 0,
+    impulse_response = rep(1, 10),
+    sigma_initial_value = 0,
+    sigma_alpha = 0
+  )$country)) == 100,
+  msg = "The simdat function return wrong number of countries"
+)
+```
+
+## Problem 3
+
+```{r, eval=T, error=TRUE, message=TRUE}
+
+# Store real IRF(impulse response function) data
+real_irf <- data.frame(h = 0:6, y = c(1, -1, 2, -2, 0, 0, 1))
+
+# Simulate data with coeff_lag_ln_gdp = 0 (non-dynamic)
+df1 <- simdat(
+  N = 50,
+  T = 1000,
+  p_pand = .1,
+  p_war = 0,
+  sigma = 10,
+  coeff_lag_ln_gdp = 0,
+  impulse_response = c(1, -1, 2, -2, 0, 0, 1),
+  sigma_initial_value = 1,
+  sigma_alpha = 5
+)
+
+# Merge simulated data with real IRF data
+estimates_1 <- lapply(0:40, FUN = runreg, df = df1) %>%
+  bind_rows() %>%
+  filter(rowname == "pandemic_01")
+estimates_1 <- left_join(estimates_1, real_irf)
+estimates_1$y <- replace_na(estimates_1$y, 0)
+
+# Plot
+plot1 <- estimates_1 %>%
+  ggplot(aes(x = h)) +
+  geom_line(aes(y = Estimate * 100)) +
+  geom_line(aes(y = y * 100), color = "red") +
+  geom_ribbon(aes(
+    ymin = (Estimate - 1.96 * `Std. Error`) * 100,
+    ymax = (Estimate + 1.96 * `Std. Error`) * 100
+  ), alpha = .1) +
+  geom_hline(yintercept = 0) +
+  xlab("Fcast horizon") +
+  ylab("Impulse response, percent") +
+  ggtitle("Estimated impulse response of pandemics on GDP pr capita - non-dynamic") +
+  theme_classic()
+
+# Simulate data with coeff_lag_ln_gdp = .96 (dynamic)
+df2 <- simdat(
+  N = 50,
+  T = 1000,
+  p_pand = .1,
+  p_war = 0,
+  sigma = 10,
+  coeff_lag_ln_gdp = .96,
+  impulse_response = c(1, -1, 2, -2, 0, 0, 1),
+  sigma_initial_value = 1,
+  sigma_alpha = 5
+)
+
+# Merge simulated data with real IRF data
+estimates_2 <- lapply(0:40, FUN = runreg, df = df2) %>%
+  bind_rows() %>%
+  filter(rowname == "pandemic_01")
+estimates_2 <- left_join(estimates_2, real_irf)
+estimates_2$y <- replace_na(estimates_2$y, 0)
+
+# Plot
+plot2 <- estimates_2 %>%
+  ggplot(aes(x = h)) +
+  geom_line(aes(y = Estimate * 100)) +
+  geom_line(aes(y = y * 100), color = "red") +
+  geom_ribbon(aes(
+    ymin = (Estimate - 1.96 * `Std. Error`) * 100,
+    ymax = (Estimate + 1.96 * `Std. Error`) * 100
+  ), alpha = .1) +
+  geom_hline(yintercept = 0) +
+  xlab("Fcast horizon") +
+  ylab("Impulse response, percent") +
+  ggtitle("Estimated impulse response of pandemics on GDP pr capita - dynamic") +
+  theme_classic()
+
+plot1
+plot2
+```
+
+Comment: IRFs in plot 1 is overlapping with real IRF. In plot 2, IRFs are similar to real IRFs. Also, Plot 2 represents a clear positive impulse response to pandemics. After several years, the effect of IRFs in Plot 2 start to diminish and the trend becomes similar to Plot 1. Thus, the effect of biased estimators can be ignored because it does diminish with increasing time dimension of the panel in this case, which covers 40 years. It manes that it will work better with a longer time period, for example, 765 years in S2020. Still, it is important to carefully interpret the results and consider the potential of bias. In addition, other methods such as the dynamic panel data estimator may provide more accurate and unbiased estimates instead of fixed effects estimator.  
+
+## Problem 4
+
+```{r, eval=T, error=TRUE, message=TRUE}
+
+runreg_baseline <- function(h, df, K) {
+  # Create independent variables for the regression
+  df <- df %>%
+    select(country, year, ln_gdp, pandemic_01, war) %>%
+    mutate(country = factor(country)) %>%
+    group_by(country) %>%
+    mutate(
+      lead_ln_gdp = lead(ln_gdp, h, order_by = year),
+      war_lag_1 = lag(war, 1, order_by = year),
+      vienna = case_when(year >= 1815 ~ 1, TRUE ~ 0),
+      vienna_lag_1 = lag(vienna, 1, order_by = year),
+      oil = case_when(year >= 1973 ~ 1, TRUE ~ 0),
+      ww2 = case_when(year >= 1945 ~ 1, TRUE ~ 0),
+      vienna_t = vienna * year,
+      oil_t = oil * year,
+      ww2_t = ww2 * year
+    )
+
+  # Create K lagged variables of ln_gdp and pandemic
+  for (i in 1:K) {
+    df <- bind_cols(df, df %>%
+      transmute(
+        !!paste0("ln_gdp_lag_", i) := lag(ln_gdp, i),
+        !!paste0("pandemic_01_lag_", i) := lag(pandemic_01, i)
+      ))
+  }
+
+  df <- df %>%
+    ungroup() %>%
+    drop_na()
+
+  # Summarize all independent variables
+  ind_vars <- names(df)[!names(df) %in% c("lead_ln_gdp", "vienna", "ln_gdp")]
+  ind_vars <- paste0(ind_vars, collapse = " + ")
+
+  # Regression
+  output <- lm(
+    data = df,
+    formula = as.formula(paste0("lead_ln_gdp ~", ind_vars))
+  ) %>%
+    summary() %>%
+    .$coefficients %>%
+    as.data.frame() %>%
+    rownames_to_column() %>%
+    as_tibble() %>%
+    mutate(h = h)
+
+  # Return the regression results
+  return(output)
+}
+
+lapply(0:40, K = 30, FUN = runreg_baseline, df = df) %>%
+  bind_rows() %>%
+  filter(rowname == "pandemic_01") %>%
+  ggplot(aes(x = h)) +
+  geom_line(aes(y = Estimate * 100)) +
+  geom_ribbon(aes(
+    ymin = (Estimate - 1.96 * `Std. Error`) * 100,
+    ymax = (Estimate + 1.96 * `Std. Error`) * 100
+  ), alpha = .1) +
+  geom_hline(yintercept = 0) +
+  xlab("Fcast horizon") +
+  ylab("Impulse response, percent") +
+  ggtitle("Estimated impulse response of pandemics on GDP pr capita (K=30)") +
+  theme_classic()
+```
+
+
+```{r, eval=T, error=TRUE, message=FALSE}
+
+# Tests for assignment 4. Leave this code chunk *unchanged* and
+# ensure you run the tests *after* the chunk with you answer to
+# assignment 4.
+
+assert_that(
+  runreg_baseline(0, df, 40) %>%
+    filter(substr(rowname, 1, 11) == "pandemic_01") %>%
+    nrow(.) == 41,
+  msg = "Function does not have the right number of lags for pandemics"
+)
+
+assert_that(
+  runreg_baseline(0, df, 70) %>%
+    filter(substr(rowname, 1, 6) == "ln_gdp") %>%
+    nrow(.) == 70,
+  msg = "Function does not have the right number of lags for ln_gdp"
+)
+```
+
+
+## Problem 5
+
+```{r, eval=T, error=TRUE, message=TRUE}
+# Load packages
+library(doParallel)
+library(animation)
+library(gganimate)
+library(countrycode)
+library(gifski)
+
+# Load world data
+world <- map_data("world") %>%
+  mutate(country = countrycode(region, "country.name", "iso3c"))
+
+# Load pandemic data
+df <- read_excel("Stefanski_pandemic_data.xlsx") %>%
+  filter(pandemic_01 == 1)
+
+# Join two data sets together
+pandemic_case <- left_join(df, world) %>%
+  select(country, year, pandemic_01, long, lat, group) %>%
+  drop_na()
+
+# Plot world map
+world_map <- ggplot(data = world, aes(x = long, y = lat, group = group)) +
+  geom_polygon(color = "grey10", fill = "grey90") +
+  theme_minimal()
+
+# Parallel Computing: instantiate the cores and register the cluster
+Cores <- 8
+cl <- makeCluster(Cores)
+registerDoParallel(cl)
+
+# Plot pandemic map
+pandemic_map <- world_map +
+  geom_point(data = pandemic_case,
+             aes(x = long, y = lat, group = year, color = "pink", size = 20),
+             show.legend = FALSE) +
+  transition_time(pandemic_case$year) +
+  ggtitle("Pandemic Map: {frame_time}") +
+  labs(fill = "")
+
+# Create a gif
+years <- diff(range(pandemic_case$year)) + 1
+anim_save("pandemics.gif", pandemic_map, nframes = years, fps = 20)
+
+# Stop cluster
+stopCluster(cl)
+```
+Comment: 'pandemics.gif' is also attached in .zip file.
+
+
+#### Session info
+
+Leave this part unchanged. The cell below prints which packages and versions were used for creating the html-file. 
+
+```{r, eval=T}
+sessionInfo()
+```
